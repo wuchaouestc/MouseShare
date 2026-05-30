@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -35,7 +35,6 @@ jobs:
           --onefile `
           --noconsole `
           --name MouseShare `
-          --add-data "assets;assets" `
           --hidden-import PySide6.QtCore `
           --hidden-import PySide6.QtWidgets `
           --hidden-import PySide6.QtGui `
