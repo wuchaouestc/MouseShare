@@ -13,6 +13,7 @@ from src.shared.protocol import (
 from src.host.input_capture import InputCapture, InputEvent, InputEventType
 from src.host.boundary_engine import BoundaryEngine, Direction
 from src.host.cursor_controller import CursorController
+from src.shared.bluetooth_scanner import set_discoverable
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class HostAgent:
             on_leave=self._on_boundary_leave,
         )
         self.sm.transition(AgentState.IDLE)
+        set_discoverable(True)
         # 启动事件处理循环
         self._event_thread = threading.Thread(target=self._event_loop, daemon=True)
         self._event_thread.start()
@@ -88,6 +90,7 @@ class HostAgent:
             self.sm.transition(AgentState.CONNECTED)
             self._last_heartbeat_recv = time.time()
             self._reconnect_attempts = 0
+            set_discoverable(False)
             logger.info(f"Connected to {address}")
             return True
         else:

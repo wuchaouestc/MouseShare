@@ -11,6 +11,7 @@ from src.shared.protocol import (
 )
 from src.target.rfcomm_server import RfcommServer
 from src.target.input_injector import InputInjector
+from src.shared.bluetooth_scanner import set_discoverable
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class TargetAgent:
                 return
 
         self.sm.transition(AgentState.IDLE)
+        set_discoverable(True)
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
         self._recv_thread.start()
         self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -152,3 +154,4 @@ class TargetAgent:
         if self.server.is_connected:
             self.sm.transition(AgentState.CONNECTED)
             self._last_heartbeat_recv = time.time()
+            set_discoverable(False)

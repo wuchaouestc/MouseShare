@@ -7,14 +7,28 @@ from src.shared.config import Config
 from src.shared.bluetooth_scanner import get_windows_bluetooth_devices
 
 
+SCAN_ATTEMPTS = (6, 10, 12)
+
+
 class ScannerThread(QThread):
     devices_found = Signal(list)
+    scan_progress = Signal(int, int)
     scan_error = Signal(str)
 
     def run(self):
+        last_devices = []
         try:
-            devices = get_windows_bluetooth_devices(only_computers=True, issue_inquiry=True)
-            self.devices_found.emit(devices)
+            for idx, timeout in enumerate(SCAN_ATTEMPTS, start=1):
+                self.scan_progress.emit(idx, len(SCAN_ATTEMPTS))
+                devices = get_windows_bluetooth_devices(
+                    only_computers=True,
+                    issue_inquiry=True,
+                    timeout_multiplier=timeout,
+                )
+                last_devices = devices
+                if devices:
+                    break
+            self.devices_found.emit(last_devices)
         except Exception as e:
             self.scan_error.emit(str(e))
             self.devices_found.emit([])
@@ -60,8 +74,17 @@ class DeviceListWidget(QWidget):
 
         self._scanner_thread = ScannerThread()
         self._scanner_thread.devices_found.connect(self._on_scan_finished)
+        self._scanner_thread.scan_progress.connect(self._on_scan_progress)
         self._scanner_thread.scan_error.connect(self._on_scan_error)
         self._scanner_thread.start()
+
+    def _on_scan_progress(self, current: int, total: int):
+        if current == 1:
+            self.status_label.setText("正在扫描周围蓝牙电脑，请稍候...")
+        else:
+            self.status_label.setText(
+                f"未发现设备，正在重试（{current}/{total}），请保持对端蓝牙处于可发现状态..."
+            )
 
     def _on_scan_error(self, msg: str):
         self.status_label.setText(f"扫描失败: {msg}")
