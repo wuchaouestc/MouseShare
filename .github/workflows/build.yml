@@ -1,0 +1,67 @@
+name: Build MouseShare Executable
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run tests
+      run: |
+        pip install pytest
+        python -m pytest tests/ -v --tb=short
+
+    - name: Build executable with PyInstaller
+      run: |
+        pyinstaller ^
+          --onefile ^
+          --noconsole ^
+          --name MouseShare ^
+          --add-data "assets;assets" ^
+          --hidden-import PySide6.QtCore ^
+          --hidden-import PySide6.QtWidgets ^
+          --hidden-import PySide6.QtGui ^
+          --hidden-import pynput.mouse ^
+          --hidden-import pynput._util ^
+          --hidden-import src.shared.protocol ^
+          --hidden-import src.shared.transport ^
+          --hidden-import src.shared.config ^
+          --hidden-import src.shared.state_machine ^
+          --hidden-import src.host.input_capture ^
+          --hidden-import src.host.boundary_engine ^
+          --hidden-import src.host.cursor_controller ^
+          --hidden-import src.host.state_machine ^
+          --hidden-import src.target.rfcomm_server ^
+          --hidden-import src.target.input_injector ^
+          --hidden-import src.target.state_machine ^
+          --hidden-import src.ui.main_window ^
+          --hidden-import src.ui.device_list ^
+          --hidden-import src.ui.layout_config ^
+          --hidden-import src.ui.status_page ^
+          --hidden-import src.ui.tray ^
+          --clean ^
+          main.py
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MouseShare
+        path: dist/MouseShare.exe
