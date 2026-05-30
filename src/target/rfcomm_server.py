@@ -18,8 +18,24 @@ SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 DEFAULT_CHUNK = 4096
 RFCOMM_PORT = 1
 RFCOMM_PORTS = tuple(range(1, 31))
+BT_PORT_ANY = 0xFFFFFFFF
 WSAEWOULDBLOCK = 10035
 FIONBIO = 0x8004667E
+
+
+class BLUETOOTH_FIND_RADIO_PARAMS(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD)]
+
+
+class BLUETOOTH_RADIO_INFO(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("address", ctypes.c_ulonglong),
+        ("szName", wintypes.WCHAR * 248),
+        ("ulClassofDevice", wintypes.ULONG),
+        ("lmpSubversion", wintypes.USHORT),
+        ("manufacturer", wintypes.USHORT),
+    ]
 
 
 def _format_bth_addr(addr: int) -> str:
@@ -83,8 +99,53 @@ class RfcommServer:
 
     def _candidate_ports(self, port: int):
         if port > 0:
-            return (port,) + tuple(p for p in RFCOMM_PORTS if p != port)
-        return RFCOMM_PORTS
+            return (BT_PORT_ANY, port) + tuple(p for p in RFCOMM_PORTS if p != port)
+        return (BT_PORT_ANY,) + RFCOMM_PORTS
+
+    def _local_radio_addresses(self):
+        addresses = []
+        try:
+            bthprops = ctypes.WinDLL("bthprops.cpl")
+            bthprops.BluetoothFindFirstRadio.argtypes = [
+                ctypes.POINTER(BLUETOOTH_FIND_RADIO_PARAMS), ctypes.POINTER(wintypes.HANDLE)
+            ]
+            bthprops.BluetoothFindFirstRadio.restype = wintypes.HANDLE
+            bthprops.BluetoothFindNextRadio.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.HANDLE)]
+            bthprops.BluetoothFindNextRadio.restype = wintypes.BOOL
+            bthprops.BluetoothFindRadioClose.argtypes = [wintypes.HANDLE]
+            bthprops.BluetoothFindRadioClose.restype = wintypes.BOOL
+            bthprops.BluetoothGetRadioInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(BLUETOOTH_RADIO_INFO)]
+            bthprops.BluetoothGetRadioInfo.restype = wintypes.DWORD
+
+            params = BLUETOOTH_FIND_RADIO_PARAMS()
+            params.dwSize = ctypes.sizeof(params)
+            h_radio = wintypes.HANDLE()
+            h_find = bthprops.BluetoothFindFirstRadio(ctypes.byref(params), ctypes.byref(h_radio))
+            if not h_find:
+                return addresses
+            try:
+                while True:
+                    info = BLUETOOTH_RADIO_INFO()
+                    info.dwSize = ctypes.sizeof(info)
+                    if bthprops.BluetoothGetRadioInfo(h_radio, ctypes.byref(info)) == 0:
+                        addresses.append(int(info.address))
+                    ctypes.windll.kernel32.CloseHandle(h_radio)
+                    h_radio = wintypes.HANDLE()
+                    if not bthprops.BluetoothFindNextRadio(h_find, ctypes.byref(h_radio)):
+                        break
+            finally:
+                bthprops.BluetoothFindRadioClose(h_find)
+        except Exception as e:
+            logger.warning("枚举本机蓝牙适配器失败: %s", e)
+        return addresses
+
+    def _candidate_local_addresses(self):
+        radios = self._local_radio_addresses()
+        if radios:
+            logger.info("发现本机蓝牙适配器: %s", ", ".join(_format_bth_addr(a) for a in radios))
+        else:
+            logger.warning("未发现本机蓝牙适配器，RFCOMM 服务端可能无法启动")
+        return (0,) + tuple(a for a in radios if a)
 
     def _init_winsock(self) -> bool:
         if self._ws2 is not None:
@@ -129,6 +190,8 @@ class RfcommServer:
             ws2.closesocket.argtypes = [ctypes.c_void_p]
             ws2.ioctlsocket.restype = wintypes.INT
             ws2.ioctlsocket.argtypes = [ctypes.c_void_p, wintypes.LONG, ctypes.POINTER(wintypes.ULONG)]
+            ws2.getsockname.restype = wintypes.INT
+            ws2.getsockname.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.INT)]
             ws2.WSAGetLastError.restype = wintypes.INT
 
             self._ctypes = ctypes
@@ -151,47 +214,66 @@ class RfcommServer:
             logger.error("Failed to initialize WinSock: %s", self._last_error)
             return False
 
+        local_addresses = self._candidate_local_addresses()
         last_error = ""
-        for candidate_port in self._candidate_ports(port):
-            sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
-            if self._is_invalid_socket(sock):
-                err = self._ws2.WSAGetLastError()
-                self._last_error = _wsa_error_str(err)
-                logger.error("Failed to create Bluetooth socket: %s", self._last_error)
-                return False
+        for local_addr in local_addresses:
+            for candidate_port in self._candidate_ports(port):
+                sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
+                if self._is_invalid_socket(sock):
+                    err = self._ws2.WSAGetLastError()
+                    self._last_error = _wsa_error_str(err)
+                    logger.error("Failed to create Bluetooth socket: %s", self._last_error)
+                    return False
 
-            addr = self._SOCKADDR_BTH()
-            addr.addressFamily = self.AF_BTH
-            addr.btAddr = 0
-            addr.port = candidate_port
+                addr = self._SOCKADDR_BTH()
+                addr.addressFamily = self.AF_BTH
+                addr.btAddr = local_addr
+                addr.port = candidate_port
 
-            rc = self._ws2.bind(sock, ctypes.byref(addr), ctypes.sizeof(addr))
-            if rc != 0:
-                err = self._ws2.WSAGetLastError()
-                self._ws2.closesocket(sock)
-                last_error = _wsa_error_str(err)
-                logger.warning("ctypes RFCOMM bind failed on port %s: %s", candidate_port, last_error)
-                continue
+                rc = self._ws2.bind(sock, ctypes.byref(addr), ctypes.sizeof(addr))
+                if rc != 0:
+                    err = self._ws2.WSAGetLastError()
+                    self._ws2.closesocket(sock)
+                    last_error = _wsa_error_str(err)
+                    port_label = "BT_PORT_ANY" if candidate_port == BT_PORT_ANY else str(candidate_port)
+                    logger.warning(
+                        "ctypes RFCOMM bind failed on local=%s port=%s: %s",
+                        _format_bth_addr(local_addr) if local_addr else "0",
+                        port_label,
+                        last_error,
+                    )
+                    continue
 
-            rc = self._ws2.listen(sock, 1)
-            if rc != 0:
-                err = self._ws2.WSAGetLastError()
-                self._ws2.closesocket(sock)
-                last_error = _wsa_error_str(err)
-                logger.warning("ctypes RFCOMM listen failed on port %s: %s", candidate_port, last_error)
-                continue
+                bound_addr = self._SOCKADDR_BTH()
+                bound_len = wintypes.INT(ctypes.sizeof(bound_addr))
+                if self._ws2.getsockname(sock, ctypes.byref(bound_addr), ctypes.byref(bound_len)) == 0:
+                    actual_port = int(bound_addr.port)
+                else:
+                    actual_port = candidate_port
 
-            self._set_nonblocking(sock)
-            self._ctypes_server = sock
-            self._running = True
-            self.bound_port = candidate_port
-            self._listen_thread = threading.Thread(target=self._accept_loop_ctypes, daemon=True)
-            self._listen_thread.start()
-            logger.info("RFCOMM Server (ctypes WinSock) listening on port %s", candidate_port)
-            return True
+                rc = self._ws2.listen(sock, 1)
+                if rc != 0:
+                    err = self._ws2.WSAGetLastError()
+                    self._ws2.closesocket(sock)
+                    last_error = _wsa_error_str(err)
+                    logger.warning("ctypes RFCOMM listen failed on port %s: %s", actual_port, last_error)
+                    continue
 
-        self._last_error = last_error or "没有可用的 RFCOMM channel"
-        logger.error("ctypes RFCOMM bind failed on all channels: %s", self._last_error)
+                self._set_nonblocking(sock)
+                self._ctypes_server = sock
+                self._running = True
+                self.bound_port = actual_port
+                self._listen_thread = threading.Thread(target=self._accept_loop_ctypes, daemon=True)
+                self._listen_thread.start()
+                logger.info(
+                    "RFCOMM Server (ctypes WinSock) listening on local=%s port=%s",
+                    _format_bth_addr(local_addr) if local_addr else "0",
+                    actual_port,
+                )
+                return True
+
+        self._last_error = last_error or "没有可用的本机蓝牙适配器或 RFCOMM channel"
+        logger.error("ctypes RFCOMM bind failed on all local addresses/channels: %s", self._last_error)
         return False
 
     def _accept_loop(self):
