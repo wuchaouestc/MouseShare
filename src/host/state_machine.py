@@ -283,8 +283,8 @@ class HostAgent:
         except Exception:
             pass
 
-    def _last_address = ""
-    def _last_port = 0
+    _last_address = ""
+    _last_port = 0
 
     def set_last_connection(self, address: str, port: int = 0):
         self._last_address = address

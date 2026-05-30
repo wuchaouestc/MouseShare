@@ -30,7 +30,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Build with PyInstaller
 echo [3/3] Building executable...
-pyinstaller ^
+python -m PyInstaller ^
     --onefile ^
     --noconsole ^
     --name MouseShare ^
