@@ -40,6 +40,7 @@ class HostAgent:
         self._heartbeat_missed = 0
         self._lock = threading.Lock()
         self._reconnect_attempts = 0
+        self.status_message = "主控端未启动"
 
     def set_transport(self, transport):
         self._transport = transport
@@ -66,6 +67,7 @@ class HostAgent:
         self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._hb_thread.start()
         logger.info("HostAgent started")
+        self.status_message = "主控端已启动，等待连接或边界触发"
 
     def stop(self):
         self._running = False
@@ -80,31 +82,37 @@ class HostAgent:
                 pass
         self.sm.transition(AgentState.EXITING)
         logger.info("HostAgent stopped")
+        self.status_message = "主控端已停止"
 
     def connect(self, address: str, port: int = 0) -> tuple:
         """返回 (success: bool, error_msg: str)"""
         if not self._transport:
             return False, "传输层未初始化"
         self.sm.transition(AgentState.CONNECTING)
+        self.status_message = f"正在连接 {address}"
         if self._transport.connect(address, port):
             self.sm.transition(AgentState.CONNECTED)
             self._last_heartbeat_recv = time.time()
             self._reconnect_attempts = 0
             set_discoverable(False)
             logger.info(f"Connected to {address}")
+            self.status_message = f"已连接到 {address}"
             return True, ""
         else:
             self.sm.transition(AgentState.IDLE)
             err = getattr(self._transport, '_last_error', '') or "连接失败（未知原因）"
             logger.error(f"Failed to connect to {address}: {err}")
+            self.status_message = f"连接失败：{err}"
             return False, err
 
     def suspend(self):
         self._stop_hosting()
+        self.status_message = "已暂停共享"
         self.sm.transition(AgentState.SUSPENDED)
 
     def resume(self):
         if self.sm.state == AgentState.SUSPENDED:
+            self.status_message = "已恢复共享"
             self.sm.transition(AgentState.IDLE)
 
     def _event_loop(self):
@@ -184,6 +192,7 @@ class HostAgent:
         # 重置输入捕获位置，避免初始跳变
         self._reset_input_position(direction.value)
         logger.info(f"Hosting started, direction={direction.value}")
+        self.status_message = f"进入主控共享，方向：{direction.value}"
 
     def _on_boundary_leave(self):
         """鼠标返回 — 退出远端控制"""
@@ -210,6 +219,7 @@ class HostAgent:
         self.boundary.reset()
         self.input.clear_queue()
         logger.info("Hosting stopped")
+        self.status_message = "已退出主控共享"
 
     def _on_emergency(self):
         """紧急解锁回调"""

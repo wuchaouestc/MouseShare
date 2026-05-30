@@ -5,7 +5,8 @@ Tab 导航：设备列表 | 布局设置 | 状态
 """
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QWidget, QLabel, QMessageBox, QProgressDialog
+    QPushButton, QWidget, QLabel, QMessageBox, QProgressDialog,
+    QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QIcon
@@ -34,6 +35,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.agent = agent
         self.config = config or load()
+        self._manual_status = ""
+        self._manual_status_until = 0
         self._init_ui()
 
     def _init_ui(self):
@@ -45,6 +48,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
+
+        # 顶部工具栏
+        top_layout = QHBoxLayout()
+        top_layout.addStretch()
+        self.btn_settings = QPushButton("设置")
+        self.btn_settings.clicked.connect(self._on_settings)
+        top_layout.addWidget(self.btn_settings)
+        layout.addLayout(top_layout)
 
         # Tab 导航
         self.tabs = QTabWidget()
@@ -59,23 +70,24 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.tabs)
 
-        # 底部按钮
+        # 底部操作和状态栏
         btn_layout = QHBoxLayout()
         self.btn_connect = QPushButton("连接")
         self.btn_suspend = QPushButton("暂停")
-        self.btn_settings = QPushButton("设置")
 
         self.btn_connect.clicked.connect(self._on_connect)
         self.btn_suspend.clicked.connect(self._on_suspend)
-        self.btn_settings.clicked.connect(self._on_settings)
 
         btn_layout.addWidget(self.btn_connect)
         btn_layout.addWidget(self.btn_suspend)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_settings)
+        btn_layout.addStretch(1)
 
-        self.status_label = QLabel("就绪")
-        btn_layout.addWidget(self.status_label)
+        self.status_label = QLabel("就绪，等待选择设备或对端连接")
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(280)
+        self.status_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.status_label.setStyleSheet("color: #333; padding-left: 12px;")
+        btn_layout.addWidget(self.status_label, 3)
         layout.addLayout(btn_layout)
 
         # 定时刷新状态
@@ -86,7 +98,18 @@ class MainWindow(QMainWindow):
         # 布局变更同步
         self.layout_config.layout_changed.connect(self._on_layout_changed)
 
+    def _set_status(self, message: str, hold_seconds: float = 4.0):
+        import time
+        self._manual_status = message
+        self._manual_status_until = time.time() + hold_seconds
+        self.status_label.setText(message)
+        self.status_page.append_log(message)
+
     def _refresh_status(self):
+        import time
+        if self._manual_status and time.time() < self._manual_status_until:
+            return
+        self._manual_status = ""
         if self.agent is None:
             self.status_label.setText("未启动")
             return
@@ -102,7 +125,15 @@ class MainWindow(QMainWindow):
         }
         role = getattr(self.agent, "role", "")
         role_text = {"peer": "等待连接", "host": "主控端", "target": "被控端"}.get(role, "")
-        self.status_label.setText(name_map.get(s.value, str(s)) if not role_text else f"{name_map.get(s.value, str(s))} · {role_text}")
+        runtime_status = getattr(self.agent, "status_message", "")
+        state_text = name_map.get(s.value, str(s))
+        parts = [state_text]
+        if role_text:
+            parts.append(role_text)
+        if runtime_status:
+            parts.append(runtime_status)
+        self.status_label.setText(" · ".join(parts))
+        self.status_page.update_state(" · ".join(parts), role_text)
 
     def _on_connect(self):
         selected = self.device_list.get_selected_device()
@@ -112,8 +143,10 @@ class MainWindow(QMainWindow):
         mac = selected.get("address", "")
         authenticated = selected.get("authenticated", False)
         if not authenticated:
+            self._set_status(f"设备 {mac} 未配对，开始配对流程，请在对端确认", 8.0)
             self._do_pair_then_connect(selected, mac)
         else:
+            self._set_status(f"设备 {mac} 已配对，正在连接", 6.0)
             self._do_connect(mac)
 
     def _do_pair_then_connect(self, device, mac):
@@ -131,8 +164,10 @@ class MainWindow(QMainWindow):
             dlg.close()
             if ok:
                 device["authenticated"] = True
+                self._set_status(f"配对成功：{name}，正在建立连接", 8.0)
                 self._do_connect(mac)
             else:
+                self._set_status(f"配对失败：{name}，{msg}", 10.0)
                 QMessageBox.warning(self, "配对失败", msg)
 
         self._pair_thread.done.connect(on_done)
@@ -141,11 +176,16 @@ class MainWindow(QMainWindow):
 
     def _do_connect(self, mac):
         if self.agent:
+            self._set_status(f"正在连接 {mac}", 6.0)
             self.agent.set_last_connection(mac)
             ok, err = self.agent.connect(mac)
             if ok:
                 self.status_page.set_address(mac)
+                role = getattr(self.agent, "role", "")
+                role_text = {"host": "主控端", "target": "被控端", "peer": "等待连接"}.get(role, "主控端")
+                self._set_status(f"连接成功：{mac}，当前角色：{role_text}", 8.0)
             else:
+                self._set_status(f"连接失败：{mac}，{err}", 10.0)
                 QMessageBox.warning(self, "连接失败", f"无法连接到 {mac}\n\n{err}")
 
     def _on_suspend(self):

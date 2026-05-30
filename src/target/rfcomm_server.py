@@ -17,6 +17,7 @@ SERVICE_NAME = "MouseShare"
 SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 DEFAULT_CHUNK = 4096
 RFCOMM_PORT = 1
+RFCOMM_PORTS = tuple(range(1, 31))
 WSAEWOULDBLOCK = 10035
 FIONBIO = 0x8004667E
 
@@ -55,6 +56,7 @@ class RfcommServer:
         self._ctypes_server = None
         self._ctypes_client = None
         self._last_error = ""
+        self.bound_port = 0
 
     def start(self, port: int = RFCOMM_PORT) -> bool:
         """启动 RFCOMM 服务，返回是否成功"""
@@ -65,6 +67,7 @@ class RfcommServer:
                 self._sock.listen(1)
                 self._sock.settimeout(2.0)
                 self._running = True
+                self.bound_port = port
                 self._listen_thread = threading.Thread(target=self._accept_loop, daemon=True)
                 self._listen_thread.start()
                 logger.info("RFCOMM Server listening on port %s", port)
@@ -77,6 +80,11 @@ class RfcommServer:
             logger.info("Python socket does not expose AF_BTH, using ctypes WinSock fallback")
 
         return self._start_ctypes(port)
+
+    def _candidate_ports(self, port: int):
+        if port > 0:
+            return (port,) + tuple(p for p in RFCOMM_PORTS if p != port)
+        return RFCOMM_PORTS
 
     def _init_winsock(self) -> bool:
         if self._ws2 is not None:
@@ -143,41 +151,48 @@ class RfcommServer:
             logger.error("Failed to initialize WinSock: %s", self._last_error)
             return False
 
-        sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
-        if self._is_invalid_socket(sock):
-            err = self._ws2.WSAGetLastError()
-            self._last_error = _wsa_error_str(err)
-            logger.error("Failed to create Bluetooth socket: %s", self._last_error)
-            return False
+        last_error = ""
+        for candidate_port in self._candidate_ports(port):
+            sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
+            if self._is_invalid_socket(sock):
+                err = self._ws2.WSAGetLastError()
+                self._last_error = _wsa_error_str(err)
+                logger.error("Failed to create Bluetooth socket: %s", self._last_error)
+                return False
 
-        addr = self._SOCKADDR_BTH()
-        addr.addressFamily = self.AF_BTH
-        addr.btAddr = 0
-        addr.port = port
+            addr = self._SOCKADDR_BTH()
+            addr.addressFamily = self.AF_BTH
+            addr.btAddr = 0
+            addr.port = candidate_port
 
-        rc = self._ws2.bind(sock, ctypes.byref(addr), ctypes.sizeof(addr))
-        if rc != 0:
-            err = self._ws2.WSAGetLastError()
-            self._ws2.closesocket(sock)
-            self._last_error = _wsa_error_str(err)
-            logger.error("ctypes RFCOMM bind failed on port %s: %s", port, self._last_error)
-            return False
+            rc = self._ws2.bind(sock, ctypes.byref(addr), ctypes.sizeof(addr))
+            if rc != 0:
+                err = self._ws2.WSAGetLastError()
+                self._ws2.closesocket(sock)
+                last_error = _wsa_error_str(err)
+                logger.warning("ctypes RFCOMM bind failed on port %s: %s", candidate_port, last_error)
+                continue
 
-        rc = self._ws2.listen(sock, 1)
-        if rc != 0:
-            err = self._ws2.WSAGetLastError()
-            self._ws2.closesocket(sock)
-            self._last_error = _wsa_error_str(err)
-            logger.error("ctypes RFCOMM listen failed: %s", self._last_error)
-            return False
+            rc = self._ws2.listen(sock, 1)
+            if rc != 0:
+                err = self._ws2.WSAGetLastError()
+                self._ws2.closesocket(sock)
+                last_error = _wsa_error_str(err)
+                logger.warning("ctypes RFCOMM listen failed on port %s: %s", candidate_port, last_error)
+                continue
 
-        self._set_nonblocking(sock)
-        self._ctypes_server = sock
-        self._running = True
-        self._listen_thread = threading.Thread(target=self._accept_loop_ctypes, daemon=True)
-        self._listen_thread.start()
-        logger.info("RFCOMM Server (ctypes WinSock) listening on port %s", port)
-        return True
+            self._set_nonblocking(sock)
+            self._ctypes_server = sock
+            self._running = True
+            self.bound_port = candidate_port
+            self._listen_thread = threading.Thread(target=self._accept_loop_ctypes, daemon=True)
+            self._listen_thread.start()
+            logger.info("RFCOMM Server (ctypes WinSock) listening on port %s", candidate_port)
+            return True
+
+        self._last_error = last_error or "没有可用的 RFCOMM channel"
+        logger.error("ctypes RFCOMM bind failed on all channels: %s", self._last_error)
+        return False
 
     def _accept_loop(self):
         while self._running:
@@ -320,6 +335,7 @@ class RfcommServer:
                 pass
             self._ctypes_server = None
         logger.info("RFCOMM Server stopped")
+        self.bound_port = 0
 
     def _close_python_server(self):
         if self._sock:

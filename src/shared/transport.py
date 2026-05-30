@@ -14,6 +14,7 @@ SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 SERVICE_NAME = "MouseShare"
 DEFAULT_CHUNK = 4096
 RFCOMM_PORT = 1
+RFCOMM_PORTS = tuple(range(1, 31))
 
 _WSA_ERRORS = {
     10004: "操作被中断",
@@ -140,41 +141,48 @@ class WinSockRfcommClient(Transport):
 
     def connect(self, address: str, port: int = 0, timeout: float = 15.0) -> bool:
         self._init_winsock()
-        if port == 0:
-            port = RFCOMM_PORT
+        ports = (port,) if port > 0 else RFCOMM_PORTS
         self._last_error = ""
+        bt_addr = 0
         try:
-            sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
-            if sock is None or sock == -1:
-                self._last_error = "无法创建蓝牙 socket"
-                return False
-
-            bt_addr = 0
             for p in address.replace("-", ":").split(":"):
                 bt_addr = (bt_addr << 8) | int(p, 16)
-
-            addr = self._SOCKADDR_BTH()
-            addr.addressFamily = self.AF_BTH
-            addr.btAddr = bt_addr
-            addr.port = port
-
-            rc = self._ws2.connect(sock, self._ctypes.byref(addr), self._ctypes.sizeof(addr))
-            if rc != 0:
-                err = self._ctypes.windll.ws2_32.WSAGetLastError()
-                self._ws2.closesocket(sock)
-                self._last_error = _wsa_error_str(err)
-                logger.error("RFCOMM connect failed: WSA 0x%X %s", err, self._last_error)
-                return False
-
-            mode = self._ctypes.c_ulong(1)
-            self._ws2.ioctlsocket(sock, 0x8004667E, self._ctypes.byref(mode))
-            self._sock = sock
-            self._connected = True
-            return True
         except Exception as e:
-            self._last_error = str(e)
-            logger.error(f"RFCOMM connect exception: {e}")
+            self._last_error = f"无效蓝牙地址 {address}: {e}"
             return False
+
+        for candidate_port in ports:
+            try:
+                sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
+                if sock is None or sock == -1:
+                    self._last_error = "无法创建蓝牙 socket"
+                    return False
+
+                addr = self._SOCKADDR_BTH()
+                addr.addressFamily = self.AF_BTH
+                addr.btAddr = bt_addr
+                addr.port = candidate_port
+
+                rc = self._ws2.connect(sock, self._ctypes.byref(addr), self._ctypes.sizeof(addr))
+                if rc != 0:
+                    err = self._ctypes.windll.ws2_32.WSAGetLastError()
+                    self._ws2.closesocket(sock)
+                    self._last_error = _wsa_error_str(err)
+                    logger.info("RFCOMM connect failed on port %s: WSA 0x%X %s", candidate_port, err, self._last_error)
+                    continue
+
+                mode = self._ctypes.c_ulong(1)
+                self._ws2.ioctlsocket(sock, 0x8004667E, self._ctypes.byref(mode))
+                self._sock = sock
+                self._connected = True
+                logger.info("RFCOMM connected to %s on port %s", address, candidate_port)
+                return True
+            except Exception as e:
+                self._last_error = str(e)
+                logger.info("RFCOMM connect exception on port %s: %s", candidate_port, e)
+
+        logger.error("RFCOMM connect failed on all channels for %s: %s", address, self._last_error)
+        return False
 
     def send(self, data: bytes) -> int:
         if not self._sock or not self._connected:

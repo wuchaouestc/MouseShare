@@ -31,14 +31,17 @@ class TargetAgent:
         self._heartbeat_missed = 0
         self._seq = 0
         self._lock = threading.Lock()
+        self.status_message = "服务端未启动"
 
     def start(self):
         self._running = True
 
         if not self.server.start():
+            self.status_message = f"服务端启动失败：{getattr(self.server, '_last_error', '未知错误')}"
             logger.error("Failed to start RFCOMM server")
             return
 
+        self.status_message = f"服务端已启动，监听 RFCOMM channel {self.server.bound_port}"
         self.sm.transition(AgentState.IDLE)
         set_discoverable(True)
         self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
@@ -50,6 +53,7 @@ class TargetAgent:
     def stop(self):
         self._running = False
         self.server.stop()
+        self.status_message = "服务端已停止"
         self.sm.transition(AgentState.EXITING)
         logger.info("TargetAgent stopped")
 
@@ -61,6 +65,7 @@ class TargetAgent:
                 if data is None:
                     # 连接断开
                     if self.sm.state != AgentState.IDLE:
+                        self.status_message = "客户端已断开，恢复等待连接"
                         logger.info("Client disconnected")
                         self.sm.transition(AgentState.IDLE)
                     continue
@@ -74,6 +79,7 @@ class TargetAgent:
                     self._heartbeat_missed += 1
                     if self._heartbeat_missed >= 3:
                         logger.warning("Heartbeat timeout")
+                        self.status_message = "心跳超时，连接已断开"
                         self.sm.transition(AgentState.IDLE)
                 else:
                     self._heartbeat_missed = 0
@@ -152,4 +158,5 @@ class TargetAgent:
         if self.server.is_connected:
             self.sm.transition(AgentState.CONNECTED)
             self._last_heartbeat_recv = time.time()
+            self.status_message = f"对端已连接：{self.server.client_address or '未知地址'}"
             set_discoverable(False)
