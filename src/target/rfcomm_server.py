@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 SERVICE_NAME = "MouseShare"
 SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 DEFAULT_CHUNK = 4096
+RFCOMM_PORT = 1
 
 
 class RfcommServer:
@@ -26,7 +27,7 @@ class RfcommServer:
         self._listen_thread = None
         self._lock = threading.Lock()
 
-    def start(self, port: int = 0) -> bool:
+    def start(self, port: int = RFCOMM_PORT) -> bool:
         """启动 RFCOMM 服务，返回是否成功"""
         try:
             # 使用标准 Winsock RFCOMM

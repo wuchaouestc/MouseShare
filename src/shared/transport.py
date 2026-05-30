@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 SERVICE_NAME = "MouseShare"
 DEFAULT_CHUNK = 4096
+RFCOMM_PORT = 1
 
 class TransportError(Exception):
     pass
@@ -94,6 +95,8 @@ class WinSockRfcommClient(Transport):
 
     def connect(self, address: str, port: int = 0, timeout: float = 15.0) -> bool:
         self._init_winsock()
+        if port == 0:
+            port = RFCOMM_PORT
         try:
             sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
             if sock is None or sock == -1:

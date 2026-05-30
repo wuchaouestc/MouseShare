@@ -102,6 +102,99 @@ def set_discoverable(enable: bool) -> bool:
         return False
 
 
+class BLUETOOTH_OOB_DATA_INFO(ctypes.Structure):
+    _fields_ = [("C", ctypes.c_byte * 16), ("R", ctypes.c_byte * 16)]
+
+
+def pair_device(address: str) -> tuple:
+    """对指定 MAC 地址的设备发起配对。
+    返回 (success: bool, error_msg: str)
+    """
+    bthprops = _load_bthprops()
+    if bthprops is None:
+        return False, "无法加载蓝牙 API"
+
+    # 先找到设备信息
+    bthprops.BluetoothFindFirstDevice.argtypes = [
+        ctypes.POINTER(BLUETOOTH_DEVICE_SEARCH_PARAMS),
+        ctypes.POINTER(BLUETOOTH_DEVICE_INFO),
+    ]
+    bthprops.BluetoothFindFirstDevice.restype = HBLUETOOTH_DEVICE_FIND
+    bthprops.BluetoothFindNextDevice.argtypes = [
+        HBLUETOOTH_DEVICE_FIND, ctypes.POINTER(BLUETOOTH_DEVICE_INFO),
+    ]
+    bthprops.BluetoothFindNextDevice.restype = wintypes.BOOL
+    bthprops.BluetoothFindDeviceClose.argtypes = [HBLUETOOTH_DEVICE_FIND]
+    bthprops.BluetoothFindDeviceClose.restype = wintypes.BOOL
+
+    # 将 MAC 字符串转为整数
+    target_addr = 0
+    for p in address.replace("-", ":").split(":"):
+        target_addr = (target_addr << 8) | int(p, 16)
+
+    search_params = BLUETOOTH_DEVICE_SEARCH_PARAMS()
+    search_params.dwSize = ctypes.sizeof(BLUETOOTH_DEVICE_SEARCH_PARAMS)
+    search_params.fReturnAuthenticated = True
+    search_params.fReturnRemembered = True
+    search_params.fReturnUnknown = True
+    search_params.fReturnConnected = True
+    search_params.fIssueInquiry = True
+    search_params.cTimeoutMultiplier = 8
+    search_params.hRadio = None
+
+    device_info = BLUETOOTH_DEVICE_INFO()
+    device_info.dwSize = ctypes.sizeof(BLUETOOTH_DEVICE_INFO)
+
+    found_info = None
+    hFind = bthprops.BluetoothFindFirstDevice(
+        ctypes.byref(search_params), ctypes.byref(device_info)
+    )
+    if hFind:
+        try:
+            while True:
+                if int(device_info.Address) == target_addr:
+                    found_info = BLUETOOTH_DEVICE_INFO()
+                    ctypes.memmove(
+                        ctypes.byref(found_info),
+                        ctypes.byref(device_info),
+                        ctypes.sizeof(BLUETOOTH_DEVICE_INFO),
+                    )
+                    break
+                if not bthprops.BluetoothFindNextDevice(hFind, ctypes.byref(device_info)):
+                    break
+        finally:
+            bthprops.BluetoothFindDeviceClose(hFind)
+
+    if found_info is None:
+        # 设备未在扫描列表中，构造一个最小 BLUETOOTH_DEVICE_INFO
+        found_info = BLUETOOTH_DEVICE_INFO()
+        found_info.dwSize = ctypes.sizeof(BLUETOOTH_DEVICE_INFO)
+        found_info.Address = target_addr
+
+    if bool(found_info.fAuthenticated):
+        return True, "已配对"
+
+    try:
+        bthprops.BluetoothAuthenticateDeviceEx.argtypes = [
+            wintypes.HWND,
+            wintypes.HANDLE,
+            ctypes.POINTER(BLUETOOTH_DEVICE_INFO),
+            ctypes.POINTER(BLUETOOTH_OOB_DATA_INFO),
+            ctypes.c_int,  # AUTHENTICATION_REQUIREMENTS
+        ]
+        bthprops.BluetoothAuthenticateDeviceEx.restype = wintypes.DWORD
+        # MITMProtectionNotRequired = 0
+        ret = bthprops.BluetoothAuthenticateDeviceEx(
+            None, None, ctypes.byref(found_info), None, 0
+        )
+        if ret == 0:
+            return True, "配对成功"
+        else:
+            return False, f"配对失败，错误码: {ret}"
+    except Exception as e:
+        return False, str(e)
+
+
 def get_windows_bluetooth_devices(
     only_computers: bool = True,
     issue_inquiry: bool = True,
