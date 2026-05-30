@@ -5,9 +5,26 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QHBoxLayout, QLabel
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThread
 from src.shared.config import Config
-import socket
+from src.shared.bluetooth_scanner import get_windows_bluetooth_devices
+
+class ScannerThread(QThread):
+    devices_found = Signal(list)
+
+    def run(self):
+        devices = []
+        try:
+            # 优先尝试使用 PyBluez
+            import bluetooth
+            nearby = bluetooth.discover_devices(duration=3, lookup_names=True)
+            for addr, name in nearby:
+                devices.append({"name": name, "address": addr})
+        except ImportError:
+            # 备用方案：Windows 原生 API
+            devices = get_windows_bluetooth_devices()
+        
+        self.devices_found.emit(devices)
 
 
 class DeviceListWidget(QWidget):
@@ -16,6 +33,7 @@ class DeviceListWidget(QWidget):
     def __init__(self, config: Config, parent=None):
         super().__init__(parent)
         self.config = config
+        self._scanner_thread = None
         self._init_ui()
         self._load_devices()
 
@@ -31,39 +49,46 @@ class DeviceListWidget(QWidget):
         layout.addWidget(self.list_widget)
 
         btn_layout = QHBoxLayout()
-        btn_refresh = QPushButton("刷新")
-        btn_refresh.clicked.connect(self._load_devices)
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.clicked.connect(self._load_devices)
         btn_layout.addStretch()
-        btn_layout.addWidget(btn_refresh)
+        btn_layout.addWidget(self.btn_refresh)
         layout.addLayout(btn_layout)
 
     def _load_devices(self):
+        self.btn_refresh.setEnabled(False)
+        self.btn_refresh.setText("扫描中...")
+        
+        # 先加载已知设备
+        self._populate_list([])
+        
+        # 启动扫描线程
+        self._scanner_thread = ScannerThread()
+        self._scanner_thread.devices_found.connect(self._on_scan_finished)
+        self._scanner_thread.start()
+
+    def _on_scan_finished(self, found_devices):
+        self.btn_refresh.setEnabled(True)
+        self.btn_refresh.setText("刷新")
+        self._populate_list(found_devices)
+
+    def _populate_list(self, scanned_devices):
         self.list_widget.clear()
-        devices = self._get_paired_devices()
-        for dev in devices:
-            item = QListWidgetItem(f"{dev['name']}\n{dev['address']}")
-            item.setData(Qt.UserRole, dev)
-            self.list_widget.addItem(item)
-
-    def _get_paired_devices(self):
-        """获取 Windows 已配对蓝牙设备"""
-        devices = []
-        try:
-            # 尝试使用 PyBluez
-            import bluetooth
-            nearby = bluetooth.discover_devices(duration=3, lookup_names=True)
-            for addr, name in nearby:
-                devices.append({"name": name, "address": addr})
-        except ImportError:
-            # 备用方案：从配置中读取已知设备
-            pass
-
-        # 从配置加载已信任设备
+        
+        devices = list(scanned_devices)
+        
+        # 合并配置中的信任设备
         for dev in self.config.trusted_devices:
             if not any(d.get("address") == dev.get("address") for d in devices):
                 devices.append(dev)
 
-        return devices
+        for dev in devices:
+            name = dev.get('name')
+            if not name:
+                name = "未知设备"
+            item = QListWidgetItem(f"{name}\n{dev['address']}")
+            item.setData(Qt.UserRole, dev)
+            self.list_widget.addItem(item)
 
     def _on_selection_changed(self, current, previous):
         if current:
@@ -78,7 +103,7 @@ class DeviceListWidget(QWidget):
 
     def add_device(self, name: str, address: str):
         dev = {"name": name, "address": address}
-        self.list_widget.addItem(f"{name}\n{address}")
         # 持久化
-        if dev not in self.config.trusted_devices:
+        if not any(d.get("address") == address for d in self.config.trusted_devices):
             self.config.trusted_devices.append(dev)
+            self.list_widget.addItem(f"{name}\n{address}")
