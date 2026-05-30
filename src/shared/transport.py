@@ -1,7 +1,7 @@
 """
 Transport — 抽象传输层 + RFCOMM WinSock 实现
 
-优先使用 PyBluez，若不可用则回退到纯 ctypes + WinSock。
+使用 Windows WinSock RFCOMM 传输鼠标数据。
 """
 import logging
 import threading
@@ -97,6 +97,12 @@ class WinSockRfcommClient(Transport):
         from ctypes import wintypes
         self._ctypes = ctypes
         ws2 = ctypes.WinDLL("ws2_32.dll")
+        ws2.WSAStartup.restype = wintypes.INT
+        ws2.WSAStartup.argtypes = [wintypes.WORD, ctypes.c_void_p]
+        wsa_data = ctypes.create_string_buffer(400)
+        rc = ws2.WSAStartup(0x0202, ctypes.byref(wsa_data))
+        if rc != 0:
+            raise TransportError(f"WSAStartup failed: {_wsa_error_str(rc)}")
 
         self.AF_BTH = 32
         self.BTHPROTO_RFCOMM = 3
@@ -104,8 +110,8 @@ class WinSockRfcommClient(Transport):
 
         class SOCKADDR_BTH(ctypes.Structure):
             _fields_ = [
-                ("addressFamily", wintypes.ULONG),
-                ("btAddr", wintypes.ULARGE_INTEGER),
+                ("addressFamily", ctypes.c_ushort),
+                ("btAddr", ctypes.c_ulonglong),
                 ("serviceClassId", ctypes.c_byte * 16),
                 ("port", wintypes.ULONG),
             ]
@@ -215,64 +221,6 @@ class WinSockRfcommClient(Transport):
         return self._connected
 
 
-class PyBluezRfcommClient(Transport):
-    """PyBluez RFCOMM 客户端"""
-    def __init__(self):
-        self._sock = None
-        self._connected = False
-
-    def connect(self, address: str, port: int = 0, timeout: float = 15.0) -> bool:
-        try:
-            import bluetooth
-            self._sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            self._sock.settimeout(timeout)
-            self._sock.connect((address, port if port > 0 else 1))
-            self._sock.settimeout(1.0)
-            self._connected = True
-            return True
-        except Exception as e:
-            logger.error(f"PyBluez connect failed: {e}")
-            return False
-
-    def send(self, data: bytes) -> int:
-        if not self._sock or not self._connected:
-            raise TransportError("Not connected")
-        try:
-            return self._sock.send(data)
-        except Exception as e:
-            self._connected = False
-            raise TransportError(f"Send error: {e}")
-
-    def recv(self, timeout: float = 1.0) -> Optional[bytes]:
-        if not self._sock or not self._connected:
-            return None
-        try:
-            self._sock.settimeout(timeout)
-            data = self._sock.recv(DEFAULT_CHUNK)
-            return data if data else b""
-        except Exception:
-            return b""
-
-    def close(self):
-        self._connected = False
-        if self._sock:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
-            self._sock = None
-
-    @property
-    def is_connected(self) -> bool:
-        return self._connected
-
-
 def create_rfcomm_client() -> Transport:
-    """工厂函数：优先 PyBluez，失败用 WinSock"""
-    try:
-        import bluetooth  # noqa: F401
-        logger.info("Using PyBluez for RFCOMM")
-        return PyBluezRfcommClient()
-    except ImportError:
-        logger.info("PyBluez not found, using ctypes+WinSock fallback")
-        return WinSockRfcommClient()
+    logger.info("Using ctypes+WinSock for RFCOMM")
+    return WinSockRfcommClient()

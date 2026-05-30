@@ -35,11 +35,9 @@ class TargetAgent:
     def start(self):
         self._running = True
 
-        # Try PyBluez first, fall back to plain socket
-        if not self.server.start_pybluez():
-            if not self.server.start():
-                logger.error("Failed to start RFCOMM server")
-                return
+        if not self.server.start():
+            logger.error("Failed to start RFCOMM server")
+            return
 
         self.sm.transition(AgentState.IDLE)
         set_discoverable(True)

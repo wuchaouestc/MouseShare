@@ -1,5 +1,7 @@
+import asyncio
 import ctypes
 import logging
+import threading
 from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
@@ -238,6 +240,67 @@ def pair_device(address: str) -> tuple:
             return False, f"配对失败：{_win_error_str(ret)}"
     except Exception as e:
         return False, f"配对异常：{e}"
+
+
+def get_bleak_devices(timeout: float = 5.0):
+    """使用 Bleak 扫描 BLE 广播设备。Bleak 不支持 RFCOMM，仅用于补充发现设备。"""
+    result = []
+    error = None
+
+    async def _scan():
+        from bleak import BleakScanner
+        return await BleakScanner.discover(timeout=timeout)
+
+    def _runner():
+        nonlocal result, error
+        try:
+            devices = asyncio.run(_scan())
+            for dev in devices:
+                address = getattr(dev, "address", "") or ""
+                if not address:
+                    continue
+                result.append({
+                    "name": getattr(dev, "name", None) or "BLE 设备",
+                    "address": address.upper(),
+                    "class_of_device": 0,
+                    "major_class": MAJOR_CLASS_MISC,
+                    "authenticated": False,
+                    "remembered": False,
+                    "connected": False,
+                    "source": "bleak",
+                })
+        except Exception as e:
+            error = e
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout + 2.0)
+    if thread.is_alive():
+        logger.warning("Bleak 扫描超时")
+        return []
+    if error:
+        logger.warning("Bleak 扫描失败: %s", error)
+        return []
+    return result
+
+
+def get_combined_bluetooth_devices(
+    only_computers: bool = True,
+    issue_inquiry: bool = True,
+    timeout_multiplier: int = 8,
+    bleak_timeout: float = 4.0,
+):
+    devices = get_windows_bluetooth_devices(
+        only_computers=only_computers,
+        issue_inquiry=issue_inquiry,
+        timeout_multiplier=timeout_multiplier,
+    )
+    known = {d.get("address") for d in devices}
+    for dev in get_bleak_devices(timeout=bleak_timeout):
+        if dev.get("address") not in known:
+            devices.append(dev)
+            known.add(dev.get("address"))
+    return devices
 
 
 def get_windows_bluetooth_devices(

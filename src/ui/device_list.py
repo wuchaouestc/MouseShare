@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from src.shared.config import Config
-from src.shared.bluetooth_scanner import get_windows_bluetooth_devices
+from src.shared.bluetooth_scanner import get_combined_bluetooth_devices
 
 
 SCAN_ATTEMPTS = (6, 10, 12)
@@ -20,7 +20,7 @@ class ScannerThread(QThread):
         try:
             for idx, timeout in enumerate(SCAN_ATTEMPTS, start=1):
                 self.scan_progress.emit(idx, len(SCAN_ATTEMPTS))
-                devices = get_windows_bluetooth_devices(
+                devices = get_combined_bluetooth_devices(
                     only_computers=True,
                     issue_inquiry=True,
                     timeout_multiplier=timeout,

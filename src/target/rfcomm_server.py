@@ -3,9 +3,12 @@ RFCOMM Server — Target 端蓝牙服务监听
 
 接受 Host 的 RFCOMM 连接，提供接收服务。
 """
-import socket
+import ctypes
 import logging
+import socket
 import threading
+import time
+from ctypes import wintypes
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -14,10 +17,30 @@ SERVICE_NAME = "MouseShare"
 SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 DEFAULT_CHUNK = 4096
 RFCOMM_PORT = 1
+WSAEWOULDBLOCK = 10035
+FIONBIO = 0x8004667E
+
+
+def _format_bth_addr(addr: int) -> str:
+    return ":".join(f"{(addr >> (8 * i)) & 0xFF:02X}" for i in range(5, -1, -1))
+
+
+def _wsa_error_str(code: int) -> str:
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.kernel32.FormatMessageW(
+            0x1000 | 0x200, None, code, 0, buf, 512, None
+        )
+        desc = buf.value.strip()
+        if desc:
+            return f"{desc} (WSA {code})"
+    except Exception:
+        pass
+    return f"WSA 错误 {code}"
 
 
 class RfcommServer:
-    """RFCOMM Server（纯 socket 实现）"""
+    """RFCOMM Server"""
     def __init__(self):
         self._sock = None
         self._client = None
@@ -26,47 +49,135 @@ class RfcommServer:
         self._connected = False
         self._listen_thread = None
         self._lock = threading.Lock()
+        self._ctypes = None
+        self._ws2 = None
+        self._SOCKADDR_BTH = None
+        self._ctypes_server = None
+        self._ctypes_client = None
+        self._last_error = ""
 
     def start(self, port: int = RFCOMM_PORT) -> bool:
         """启动 RFCOMM 服务，返回是否成功"""
+        if hasattr(socket, "AF_BTH") and hasattr(socket, "BTHPROTO_RFCOMM"):
+            try:
+                self._sock = socket.socket(socket.AF_BTH, socket.SOCK_STREAM, socket.BTHPROTO_RFCOMM)
+                self._sock.bind(("", port))
+                self._sock.listen(1)
+                self._sock.settimeout(2.0)
+                self._running = True
+                self._listen_thread = threading.Thread(target=self._accept_loop, daemon=True)
+                self._listen_thread.start()
+                logger.info("RFCOMM Server listening on port %s", port)
+                return True
+            except Exception as e:
+                self._last_error = str(e)
+                logger.warning("Python socket RFCOMM start failed: %s", e)
+                self._close_python_server()
+        else:
+            logger.info("Python socket does not expose AF_BTH, using ctypes WinSock fallback")
+
+        return self._start_ctypes(port)
+
+    def _init_winsock(self) -> bool:
+        if self._ws2 is not None:
+            return True
         try:
-            # 使用标准 Winsock RFCOMM
-            self._sock = socket.socket(socket.AF_BTH, socket.SOCK_STREAM, socket.BTHPROTO_RFCOMM)
-            self._sock.bind(("", port))
-            self._sock.listen(1)
-            self._sock.settimeout(2.0)
-            self._running = True
-            self._listen_thread = threading.Thread(target=self._accept_loop, daemon=True)
-            self._listen_thread.start()
-            logger.info(f"RFCOMM Server listening on port {port}")
+            ws2 = ctypes.WinDLL("ws2_32.dll")
+            ws2.WSAStartup.restype = wintypes.INT
+            ws2.WSAStartup.argtypes = [wintypes.WORD, ctypes.c_void_p]
+            wsa_data = ctypes.create_string_buffer(400)
+            rc = ws2.WSAStartup(0x0202, ctypes.byref(wsa_data))
+            if rc != 0:
+                self._last_error = _wsa_error_str(rc)
+                return False
+
+            class SOCKADDR_BTH(ctypes.Structure):
+                _fields_ = [
+                    ("addressFamily", ctypes.c_ushort),
+                    ("btAddr", ctypes.c_ulonglong),
+                    ("serviceClassId", ctypes.c_byte * 16),
+                    ("port", wintypes.ULONG),
+                ]
+
+            self.AF_BTH = 32
+            self.BTHPROTO_RFCOMM = 3
+            self.SOCK_STREAM = 1
+            self.INVALID_SOCKET = ctypes.c_void_p(-1).value
+            self._SOCKADDR_BTH = SOCKADDR_BTH
+
+            ws2.socket.restype = ctypes.c_void_p
+            ws2.socket.argtypes = [wintypes.INT, wintypes.INT, wintypes.INT]
+            ws2.bind.restype = wintypes.INT
+            ws2.bind.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.INT]
+            ws2.listen.restype = wintypes.INT
+            ws2.listen.argtypes = [ctypes.c_void_p, wintypes.INT]
+            ws2.accept.restype = ctypes.c_void_p
+            ws2.accept.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.INT)]
+            ws2.recv.restype = wintypes.INT
+            ws2.recv.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.INT, wintypes.INT]
+            ws2.send.restype = wintypes.INT
+            ws2.send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.INT, wintypes.INT]
+            ws2.closesocket.restype = wintypes.INT
+            ws2.closesocket.argtypes = [ctypes.c_void_p]
+            ws2.ioctlsocket.restype = wintypes.INT
+            ws2.ioctlsocket.argtypes = [ctypes.c_void_p, wintypes.LONG, ctypes.POINTER(wintypes.ULONG)]
+            ws2.WSAGetLastError.restype = wintypes.INT
+
+            self._ctypes = ctypes
+            self._ws2 = ws2
             return True
         except Exception as e:
-            logger.error(f"Failed to start RFCOMM Server: {e}")
+            self._last_error = str(e)
+            logger.error("WinSock init failed: %s", e)
             return False
 
-    def start_pybluez(self, port: int = RFCOMM_PORT) -> bool:
-        """使用 PyBluez 启动 RFCOMM 服务"""
-        try:
-            import bluetooth
-            self._pbsock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            self._pbsock.bind(("", port))
-            self._pbsock.listen(1)
-            self._pbsock.settimeout(2.0)
+    def _is_invalid_socket(self, sock) -> bool:
+        return sock is None or sock == self.INVALID_SOCKET or sock == -1
 
-            bluetooth.advertise_service(
-                self._pbsock, SERVICE_NAME,
-                service_id=SERVICE_UUID,
-                service_classes=[SERVICE_UUID, bluetooth.SERIAL_PORT_CLASS],
-                profiles=[bluetooth.SERIAL_PORT_PROFILE],
-            )
-            self._running = True
-            self._listen_thread = threading.Thread(target=self._accept_loop_pybluez, daemon=True)
-            self._listen_thread.start()
-            logger.info("RFCOMM Server (PyBluez) started with SDP advertisement")
-            return True
-        except Exception as e:
-            logger.error(f"PyBluez server start failed: {e}")
+    def _set_nonblocking(self, sock):
+        mode = wintypes.ULONG(1)
+        self._ws2.ioctlsocket(sock, FIONBIO, ctypes.byref(mode))
+
+    def _start_ctypes(self, port: int) -> bool:
+        if not self._init_winsock():
+            logger.error("Failed to initialize WinSock: %s", self._last_error)
             return False
+
+        sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
+        if self._is_invalid_socket(sock):
+            err = self._ws2.WSAGetLastError()
+            self._last_error = _wsa_error_str(err)
+            logger.error("Failed to create Bluetooth socket: %s", self._last_error)
+            return False
+
+        addr = self._SOCKADDR_BTH()
+        addr.addressFamily = self.AF_BTH
+        addr.btAddr = 0
+        addr.port = port
+
+        rc = self._ws2.bind(sock, ctypes.byref(addr), ctypes.sizeof(addr))
+        if rc != 0:
+            err = self._ws2.WSAGetLastError()
+            self._ws2.closesocket(sock)
+            self._last_error = _wsa_error_str(err)
+            logger.error("ctypes RFCOMM bind failed on port %s: %s", port, self._last_error)
+            return False
+
+        rc = self._ws2.listen(sock, 1)
+        if rc != 0:
+            err = self._ws2.WSAGetLastError()
+            self._ws2.closesocket(sock)
+            self._last_error = _wsa_error_str(err)
+            logger.error("ctypes RFCOMM listen failed: %s", self._last_error)
+            return False
+
+        self._set_nonblocking(sock)
+        self._ctypes_server = sock
+        self._running = True
+        self._listen_thread = threading.Thread(target=self._accept_loop_ctypes, daemon=True)
+        self._listen_thread.start()
+        logger.info("RFCOMM Server (ctypes WinSock) listening on port %s", port)
+        return True
 
     def _accept_loop(self):
         while self._running:
@@ -82,42 +193,47 @@ class RfcommServer:
                     self._client = client
                     self._client_addr = addr
                     self._connected = True
-                logger.info(f"Client connected: {addr}")
+                logger.info("Client connected: %s", addr)
             except socket.timeout:
                 continue
             except Exception as e:
                 if self._running:
-                    logger.error(f"Accept error: {e}")
+                    logger.error("Accept error: %s", e)
                 break
 
-    def _accept_loop_pybluez(self):
+    def _accept_loop_ctypes(self):
         while self._running:
-            try:
-                client, addr = self._pbsock.accept()
-                client.settimeout(1.0)
-                with self._lock:
-                    if hasattr(self, '_pbclient') and self._pbclient:
-                        try:
-                            self._pbclient.close()
-                        except Exception:
-                            pass
-                    self._pbclient = client
-                    self._client_addr = addr
-                    self._connected = True
-                logger.info(f"Client connected (PyBluez): {addr}")
-            except Exception as e:
+            addr = self._SOCKADDR_BTH()
+            addr_len = wintypes.INT(ctypes.sizeof(addr))
+            client = self._ws2.accept(self._ctypes_server, ctypes.byref(addr), ctypes.byref(addr_len))
+            if self._is_invalid_socket(client):
+                err = self._ws2.WSAGetLastError()
+                if err == WSAEWOULDBLOCK:
+                    time.sleep(0.05)
+                    continue
                 if self._running:
-                    logger.error(f"PyBluez accept error: {e}")
-                break
+                    logger.error("ctypes RFCOMM accept failed: %s", _wsa_error_str(err))
+                time.sleep(0.2)
+                continue
+
+            self._set_nonblocking(client)
+            with self._lock:
+                if self._ctypes_client is not None:
+                    self._ws2.closesocket(self._ctypes_client)
+                self._ctypes_client = client
+                self._client_addr = _format_bth_addr(int(addr.btAddr))
+                self._connected = True
+            logger.info("Client connected (ctypes WinSock): %s", self._client_addr)
 
     def recv(self, timeout: float = 1.0) -> Optional[bytes]:
         with self._lock:
             if not self._connected:
                 return None
-            try:
-                sock = self._pbclient if hasattr(self, '_pbclient') and self._pbclient else self._client
-            except AttributeError:
-                return None
+            ctypes_client = self._ctypes_client
+            sock = self._client
+
+        if ctypes_client is not None:
+            return self._recv_ctypes(ctypes_client, timeout)
 
         if not sock:
             return None
@@ -130,22 +246,53 @@ class RfcommServer:
             return data
         except (socket.timeout, BlockingIOError):
             return b""
-        except Exception:
+        except Exception as e:
+            logger.error("RFCOMM recv failed: %s", e)
             self._connected = False
             return None
 
+    def _recv_ctypes(self, sock, timeout: float) -> Optional[bytes]:
+        deadline = time.time() + timeout
+        while self._running:
+            buf = ctypes.create_string_buffer(DEFAULT_CHUNK)
+            rc = self._ws2.recv(sock, buf, DEFAULT_CHUNK, 0)
+            if rc > 0:
+                return buf.raw[:rc]
+            if rc == 0:
+                self._connected = False
+                return None
+            err = self._ws2.WSAGetLastError()
+            if err == WSAEWOULDBLOCK:
+                if time.time() >= deadline:
+                    return b""
+                time.sleep(0.02)
+                continue
+            logger.error("ctypes RFCOMM recv failed: %s", _wsa_error_str(err))
+            self._connected = False
+            return None
+        return None
+
     def send(self, data: bytes) -> int:
-        sock = None
         with self._lock:
-            try:
-                sock = self._pbclient if hasattr(self, '_pbclient') and self._pbclient else self._client
-            except AttributeError:
-                pass
+            ctypes_client = self._ctypes_client
+            sock = self._client
+
+        if ctypes_client is not None:
+            buf = ctypes.create_string_buffer(data, len(data))
+            rc = self._ws2.send(ctypes_client, buf, len(data), 0)
+            if rc < 0:
+                err = self._ws2.WSAGetLastError()
+                logger.error("ctypes RFCOMM send failed: %s", _wsa_error_str(err))
+                self._connected = False
+                return -1
+            return rc
+
         if not sock:
             return -1
         try:
             return sock.send(data)
-        except Exception:
+        except Exception as e:
+            logger.error("RFCOMM send failed: %s", e)
             self._connected = False
             return -1
 
@@ -159,22 +306,28 @@ class RfcommServer:
                 except Exception:
                     pass
                 self._client = None
-            if hasattr(self, '_pbclient') and self._pbclient:
+            if self._ctypes_client is not None:
                 try:
-                    self._pbclient.close()
+                    self._ws2.closesocket(self._ctypes_client)
                 except Exception:
                     pass
+                self._ctypes_client = None
+        self._close_python_server()
+        if self._ctypes_server is not None:
+            try:
+                self._ws2.closesocket(self._ctypes_server)
+            except Exception:
+                pass
+            self._ctypes_server = None
+        logger.info("RFCOMM Server stopped")
+
+    def _close_python_server(self):
         if self._sock:
             try:
                 self._sock.close()
             except Exception:
                 pass
-        if hasattr(self, '_pbsock') and self._pbsock:
-            try:
-                self._pbsock.close()
-            except Exception:
-                pass
-        logger.info("RFCOMM Server stopped")
+            self._sock = None
 
     @property
     def is_connected(self) -> bool:
