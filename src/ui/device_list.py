@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QHBoxLayout, QLabel
+    QPushButton, QHBoxLayout, QLabel, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from src.shared.config import Config
@@ -15,13 +15,17 @@ class ScannerThread(QThread):
     scan_progress = Signal(int, int)
     scan_error = Signal(str)
 
+    def __init__(self, only_computers: bool):
+        super().__init__()
+        self.only_computers = only_computers
+
     def run(self):
         last_devices = []
         try:
             for idx, timeout in enumerate(SCAN_ATTEMPTS, start=1):
                 self.scan_progress.emit(idx, len(SCAN_ATTEMPTS))
                 devices = get_combined_bluetooth_devices(
-                    only_computers=True,
+                    only_computers=self.only_computers,
                     issue_inquiry=True,
                     timeout_multiplier=timeout,
                 )
@@ -41,15 +45,23 @@ class DeviceListWidget(QWidget):
         super().__init__(parent)
         self.config = config
         self._scanner_thread = None
+        self._last_scanned_devices = []
         self._init_ui()
         self._load_devices()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
 
-        label = QLabel("周围的 Windows 蓝牙电脑")
+        header_layout = QHBoxLayout()
+        label = QLabel("周围的蓝牙设备")
         label.setStyleSheet("font-weight: bold; font-size: 13px;")
-        layout.addWidget(label)
+        self.chk_only_computers = QCheckBox("只显示电脑设备")
+        self.chk_only_computers.setChecked(True)
+        self.chk_only_computers.stateChanged.connect(self._on_filter_changed)
+        header_layout.addWidget(label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.chk_only_computers)
+        layout.addLayout(header_layout)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: gray; font-size: 11px;")
@@ -72,7 +84,7 @@ class DeviceListWidget(QWidget):
         self.status_label.setText("正在扫描周围蓝牙电脑，请稍候...")
         self.list_widget.clear()
 
-        self._scanner_thread = ScannerThread()
+        self._scanner_thread = ScannerThread(self.chk_only_computers.isChecked())
         self._scanner_thread.devices_found.connect(self._on_scan_finished)
         self._scanner_thread.scan_progress.connect(self._on_scan_progress)
         self._scanner_thread.scan_error.connect(self._on_scan_error)
@@ -92,19 +104,33 @@ class DeviceListWidget(QWidget):
     def _on_scan_finished(self, found_devices):
         self.btn_refresh.setEnabled(True)
         self.btn_refresh.setText("刷新")
-        self._populate_list(found_devices)
+        self._last_scanned_devices = list(found_devices)
+        self._populate_list(self._last_scanned_devices)
+
+    def _on_filter_changed(self):
+        self._populate_list(self._last_scanned_devices)
+
+    def _is_computer_device(self, dev: dict) -> bool:
+        major = dev.get("major_class")
+        return major in (None, 0, 1, 31)
 
     def _populate_list(self, scanned_devices):
         self.list_widget.clear()
 
-        devices = list(scanned_devices)
+        only_computers = self.chk_only_computers.isChecked()
+        devices = [d for d in scanned_devices if not only_computers or self._is_computer_device(d)]
 
         for dev in self.config.trusted_devices:
+            if only_computers and not self._is_computer_device(dev):
+                continue
             if not any(d.get("address") == dev.get("address") for d in devices):
                 devices.append(dev)
 
         if not devices:
-            self.status_label.setText("未发现周围蓝牙电脑。请确认对端电脑蓝牙已开启且可被发现。")
+            if only_computers:
+                self.status_label.setText("未发现周围蓝牙电脑。可取消右上角过滤查看全部设备。")
+            else:
+                self.status_label.setText("未发现周围蓝牙设备。请确认对端蓝牙已开启且可被发现。")
             return
 
         self.status_label.setText(f"发现 {len(devices)} 台设备")
