@@ -100,7 +100,9 @@ class MainWindow(QMainWindow):
             5: "共享中 (主控)", 6: "共享中 (被控)",
             7: "已暂停", 8: "重连中...", 9: "退出"
         }
-        self.status_label.setText(name_map.get(s.value, str(s)))
+        role = getattr(self.agent, "role", "")
+        role_text = {"peer": "等待连接", "host": "主控端", "target": "被控端"}.get(role, "")
+        self.status_label.setText(name_map.get(s.value, str(s)) if not role_text else f"{name_map.get(s.value, str(s))} · {role_text}")
 
     def _on_connect(self):
         selected = self.device_list.get_selected_device()
@@ -140,10 +142,11 @@ class MainWindow(QMainWindow):
     def _do_connect(self, mac):
         if self.agent:
             self.agent.set_last_connection(mac)
-            if self.agent.connect(mac):
+            ok, err = self.agent.connect(mac)
+            if ok:
                 self.status_page.set_address(mac)
             else:
-                QMessageBox.warning(self, "连接失败", f"无法连接到 {mac}")
+                QMessageBox.warning(self, "连接失败", f"无法连接到 {mac}\n\n{err}")
 
     def _on_suspend(self):
         if self.agent:

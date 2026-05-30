@@ -44,12 +44,12 @@ class RfcommServer:
             logger.error(f"Failed to start RFCOMM Server: {e}")
             return False
 
-    def start_pybluez(self, port: int = 0) -> bool:
+    def start_pybluez(self, port: int = RFCOMM_PORT) -> bool:
         """使用 PyBluez 启动 RFCOMM 服务"""
         try:
             import bluetooth
             self._pbsock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            self._pbsock.bind(("", port if port > 0 else bluetooth.PORT_ANY))
+            self._pbsock.bind(("", port))
             self._pbsock.listen(1)
             self._pbsock.settimeout(2.0)
 

@@ -81,10 +81,10 @@ class HostAgent:
         self.sm.transition(AgentState.EXITING)
         logger.info("HostAgent stopped")
 
-    def connect(self, address: str, port: int = 0) -> bool:
+    def connect(self, address: str, port: int = 0) -> tuple:
+        """返回 (success: bool, error_msg: str)"""
         if not self._transport:
-            logger.error("No transport set")
-            return False
+            return False, "传输层未初始化"
         self.sm.transition(AgentState.CONNECTING)
         if self._transport.connect(address, port):
             self.sm.transition(AgentState.CONNECTED)
@@ -92,11 +92,12 @@ class HostAgent:
             self._reconnect_attempts = 0
             set_discoverable(False)
             logger.info(f"Connected to {address}")
-            return True
+            return True, ""
         else:
             self.sm.transition(AgentState.IDLE)
-            logger.error(f"Failed to connect to {address}")
-            return False
+            err = getattr(self._transport, '_last_error', '') or "连接失败（未知原因）"
+            logger.error(f"Failed to connect to {address}: {err}")
+            return False, err
 
     def suspend(self):
         self._stop_hosting()

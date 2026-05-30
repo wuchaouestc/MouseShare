@@ -3,6 +3,7 @@ Config — JSON 配置读写
 """
 import json
 import os
+import sys
 from dataclasses import dataclass, field, asdict
 from typing import List
 
@@ -42,6 +43,9 @@ def save(cfg: Config):
         json.dump(asdict(cfg), f, indent=2, ensure_ascii=False)
 
 def get_log_dir() -> str:
-    path = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "MouseShare", "logs")
+    path = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+    if not getattr(sys, 'frozen', False):
+        # 开发模式：__file__ 是 config.py，向上两级到项目根目录
+        path = os.path.dirname(os.path.dirname(path))
     os.makedirs(path, exist_ok=True)
     return path

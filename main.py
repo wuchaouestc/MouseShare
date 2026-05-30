@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt
 
 from src.shared.config import Config, load, save
 from src.shared.transport import create_rfcomm_client
+from src.shared.peer_agent import PeerAgent
 from src.host.state_machine import HostAgent
 from src.target.state_machine import TargetAgent
 from src.ui.main_window import MainWindow
@@ -45,6 +46,50 @@ def setup_logging():
     # 减少第三方库日志
     logging.getLogger("PySide6").setLevel(logging.WARNING)
     logging.getLogger("pynput").setLevel(logging.WARNING)
+
+
+def run_peer(config: Config):
+    """以 Peer 模式运行：同时监听和准备主动连接"""
+    agent = PeerAgent()
+    agent.set_direction(config.layout_direction)
+
+    def on_exit():
+        agent.stop()
+        QApplication.quit()
+
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    window = MainWindow(agent=agent, config=config)
+    tray = TrayIcon()
+    tray.open_requested.connect(window.show)
+    tray.open_requested.connect(window.raise_)
+    tray.suspend_toggled.connect(lambda: agent.suspend() if agent.sm.is_controlling else agent.resume())
+    tray.reconnect_requested.connect(lambda: None)
+    tray.exit_requested.connect(on_exit)
+
+    agent.start()
+
+    def check_role():
+        import time
+        last_role = "peer"
+        while True:
+            time.sleep(0.5)
+            if agent.role != last_role:
+                last_role = agent.role
+                if agent.role == "host":
+                    tray.show_notification("MouseShare", "已作为主控端连接")
+                    tray.set_icon_state("connected")
+                elif agent.role == "target":
+                    tray.show_notification("MouseShare", "已作为被控端连接")
+                    tray.set_icon_state("connected")
+                break
+
+    import threading
+    threading.Thread(target=check_role, daemon=True).start()
+
+    window.show()
+    sys.exit(app.exec())
 
 
 def run_host(config: Config, address: str):
@@ -83,10 +128,11 @@ def run_host(config: Config, address: str):
 def _auto_connect(agent, address, tray):
     import time
     time.sleep(1)
-    if agent.connect(address):
+    ok, err = agent.connect(address)
+    if ok:
         tray.show_notification("MouseShare", f"已连接到 {address}")
     else:
-        tray.show_notification("MouseShare", f"连接失败: {address}")
+        tray.show_notification("MouseShare", f"连接失败: {address}\n{err}")
 
 
 def run_target(config: Config):
@@ -143,9 +189,8 @@ def main():
         logger.info(f"Running as Host, connecting to {args.host}")
         run_host(config, args.host)
     else:
-        # 默认模式：启动 GUI，用户自行选择
-        logger.info("Running in GUI mode")
-        run_host(config, "")
+        logger.info("Running in Peer mode")
+        run_peer(config)
 
 
 if __name__ == "__main__":

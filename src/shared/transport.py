@@ -15,6 +15,44 @@ SERVICE_NAME = "MouseShare"
 DEFAULT_CHUNK = 4096
 RFCOMM_PORT = 1
 
+_WSA_ERRORS = {
+    10004: "操作被中断",
+    10013: "拒绝访问（权限不足）",
+    10022: "参数无效",
+    10035: "操作正在进行中（WSAEWOULDBLOCK）",
+    10048: "地址已在使用中",
+    10049: "无法分配请求的地址",
+    10050: "网络已关闭",
+    10051: "网络不可达",
+    10052: "网络连接因重置而中断",
+    10053: "软件导致连接中止",
+    10054: "对端强制关闭了连接",
+    10055: "缓冲区空间不足",
+    10057: "Socket 未连接",
+    10058: "Socket 已关闭，无法发送或接收",
+    10060: "连接超时（对端未响应）",
+    10061: "连接被拒绝（对端未监听或端口错误）",
+    10064: "主机已关闭",
+    10065: "主机不可达",
+}
+
+
+def _wsa_error_str(code: int) -> str:
+    if code in _WSA_ERRORS:
+        return f"{_WSA_ERRORS[code]} (WSA {code})"
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.kernel32.FormatMessageW(
+            0x1000 | 0x200, None, code, 0, buf, 512, None
+        )
+        desc = buf.value.strip()
+        if desc:
+            return f"{desc} (WSA {code})"
+    except Exception:
+        pass
+    return f"WSA 错误 {code}"
+
 class TransportError(Exception):
     pass
 
@@ -50,6 +88,7 @@ class WinSockRfcommClient(Transport):
         self._lock = threading.Lock()
         self._ctypes = None
         self._winsock = None
+        self._last_error = ""
 
     def _init_winsock(self):
         if self._ctypes is not None:
@@ -97,15 +136,15 @@ class WinSockRfcommClient(Transport):
         self._init_winsock()
         if port == 0:
             port = RFCOMM_PORT
+        self._last_error = ""
         try:
             sock = self._ws2.socket(self.AF_BTH, self.SOCK_STREAM, self.BTHPROTO_RFCOMM)
             if sock is None or sock == -1:
+                self._last_error = "无法创建蓝牙 socket"
                 return False
 
-            # Parse MAC address "XX:XX:XX:XX:XX:XX" -> 64-bit
             bt_addr = 0
-            parts = address.replace("-", ":").split(":")
-            for p in parts:
+            for p in address.replace("-", ":").split(":"):
                 bt_addr = (bt_addr << 8) | int(p, 16)
 
             addr = self._SOCKADDR_BTH()
@@ -113,21 +152,22 @@ class WinSockRfcommClient(Transport):
             addr.btAddr = bt_addr
             addr.port = port
 
-            addr_size = self._ctypes.sizeof(addr)
-            rc = self._ws2.connect(sock, self._ctypes.byref(addr), addr_size)
+            rc = self._ws2.connect(sock, self._ctypes.byref(addr), self._ctypes.sizeof(addr))
             if rc != 0:
+                err = self._ctypes.windll.ws2_32.WSAGetLastError()
                 self._ws2.closesocket(sock)
+                self._last_error = _wsa_error_str(err)
+                logger.error("RFCOMM connect failed: WSA 0x%X %s", err, self._last_error)
                 return False
 
-            # Set non-blocking
             mode = self._ctypes.c_ulong(1)
-            self._ws2.ioctlsocket(sock, 0x8004667E, self._ctypes.byref(mode))  # FIONBIO
-
+            self._ws2.ioctlsocket(sock, 0x8004667E, self._ctypes.byref(mode))
             self._sock = sock
             self._connected = True
             return True
         except Exception as e:
-            logger.error(f"RFCOMM connect failed: {e}")
+            self._last_error = str(e)
+            logger.error(f"RFCOMM connect exception: {e}")
             return False
 
     def send(self, data: bytes) -> int:
